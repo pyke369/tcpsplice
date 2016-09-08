@@ -1,0 +1,5 @@
+tcpsplice (1.0.1) stable; urgency=medium
+
+  * initial version
+
+ -- Pierre-Yves Kerembellec <py.kerembellec@gmail.com>  Wed, 09 Sep 2016 10:27:46 +0200

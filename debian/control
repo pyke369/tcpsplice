@@ -1,0 +1,10 @@
+Source: tcpsplice
+Section: net
+Priority: optional
+Maintainer: Pierre-Yves Kerembellec <py.kerembellec@gmail.com>
+Build-Depends: debhelper (>= 5), git-core, golang-go (>= 1.6), make
+Standards-Version: 3.7.2
+
+Package: tcpsplice
+Architecture: any
+Description: advanced TCP connection splicer

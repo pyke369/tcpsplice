@@ -1,0 +1,212 @@
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+*
+{
+    box-sizing: border-box;
+}
+body
+{
+    margin: 0px;
+    padding: 10px;
+}
+#header
+{
+    float: left;
+    clear: both;
+    width: 100%;
+    min-width: 1000px;
+    height: 30px;
+    margin-bottom: 20px;
+    background-color: #f0f0f0;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px;
+    color: #404040;
+}
+#header span
+{
+    float: left;
+    display: block;
+    margin: 4px 10px 0px 10px;
+    font-family: arial, verdana;
+    font-size: 16px;
+    font-weight: bold;
+}
+.service
+{
+    float: left;
+    clear: both;
+    width: 100%;
+    min-width: 1000px;
+    height: 30px;
+    border: 1px solid #e0e0e0;
+    border-radius: 4px 4px 0px 0px;
+    background-color: #f0f0f0;
+    color: #404040;
+}
+.service span
+{
+    float: left;
+    display: block;
+    margin: 4px 10px 0px 10px;
+    font-family: arial, verdana;
+    font-size: 16px;
+    font-weight: bold;
+}
+.sessions
+{
+    clear: both;
+    width: 100%;
+    min-width: 1000px;
+    min-height: 38px;
+    margin-bottom: 10px;
+    border: 1px solid #e0e0e0;
+    border-top: none;
+    border-radius: 0px 0px 4px 4px;
+}
+.session
+{
+    width: 100%;
+    font-family: arial, verdana;
+    font-size: 13px;
+}
+.session:nth-child(even)
+{
+    background-color: #f0f0f0;
+}
+.session:nth-child(odd) 
+{
+    background-color: #f8f8f8;
+}
+.session:last-child
+{
+    border-radius: 0px 0px 4px 4px;
+}
+.session:hover
+{
+    background-color: #d0d0d0;
+}
+.session span
+{
+    display: inline-block;
+    padding: 2px 6px 2px 6px;
+    text-align: right;
+    border-right: 1px solid #e0e0e0;
+}
+.session a
+{
+    text-decoration: none;
+}
+.done
+{
+    background-color: #ffffbb !important;
+}
+.xlarge
+{
+    width: 230px;
+}
+.large
+{
+    width: 170px;
+}
+.medium
+{
+    width: 130px;
+}
+.small
+{
+    width: 50px;
+    text-align: center !important;
+}
+</style>
+<script src="https://code.jquery.com/jquery-3.1.0.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/sprintf/1.0.3/sprintf.min.js"></script>
+<script language="javascript" type="text/javascript">
+function age(seconds)
+{
+    var date = '';
+    $.each([['d',86400],['h',3600],['mn',60],['s',1]], function(index, value)
+    {
+        if ((x = Math.floor(seconds / value[1])) != 0)
+        {
+            date    += sprintf("%d%s ", x, value[0]);
+            seconds -= (x * value[1]);
+        }
+    });
+    return (date == '' ? '-' : date);
+}
+
+function size(bytes)
+{
+    if (bytes >= 1000000000) return sprintf("%.2fGB", bytes / 1000000000);
+    if (bytes >= 1000000)    return sprintf("%.2fMB", bytes / 1000000);
+    return sprintf("%.2fkB", bytes / 1000)
+}
+
+function terminate(id)
+{
+    $.ajax({ url: sprintf('/close/%s', id) });
+    return false;
+}
+
+function update()
+{
+    $.ajax
+    ({
+        url: sprintf('/sessions.json?_=%d', Math.random()),
+        success: function(data, status, request)
+        {
+            $('#version').html(sprintf('tcpsplice v%s', data.server.version))
+            $('#started').html(sprintf('started %s ago', age(data.server.uptime)))
+            services = '';
+            $.each(data.services, function(service, sessions)
+            {
+                ids   = [];
+                total = [0, 0];
+                $.each(sessions, function(session, info)
+                {
+                    ids.push([session, info.duration]);
+                    total[0] += info.mean[0];
+                    total[1] += info.mean[1];
+                });
+                ids.sort(function(a, b) { return a[1] > b[1] ? -1 : (a[1] < b[1] ? 1 : 0); });
+
+                services += sprintf('<div class="service"><span>%s service</span>' +
+                                    '<span style="float:right">%.1fMbps&#9660;</span>' +
+                                    '<span style="float:right">%.1fMbps&#9650;</span>' +
+                                    '<span style="float:right">%d connection%s</span>' +
+                                    '</div><div class="sessions">',
+									service, total[1], total[0], ids.length, ids.length > 1 ? "s" : "");
+                $.each(ids, function(index, session)
+                {
+                    info = sessions[session[0]];
+                    services += sprintf('<div class="session%s">' +
+                                        '<span class="large">%s</span><span class="large">%s</span><span class="medium">%s</span>' +
+                                        '<span class="xlarge">%s - %.1fMbps - %.1fMbps &#9650;</span>' +
+                                        '<span class="xlarge">%s - %.1fMbps - %.1fMbps &#9660;</span>' +
+                                        '<span class="small"><a href="#" onclick="return terminate(\'%s\');">&#10060;</a></span>' +
+                                        '</div>',
+                                        info.done ? " done" : "",
+                                        info.source, info.target, age(info.duration),
+                                        size(info.bytes[0]), info.mean[0], info.last[0],
+                                        size(info.bytes[1]), info.mean[1], info.last[1], session[0]);
+                });
+                services += '</div>';
+            });
+            $('#services').html(services);
+        }
+    });
+}
+setInterval('update()', 1000);
+update();
+</script>
+</head>
+<body>
+<div id="header">
+  <span id="started" style="float:right">-</span>
+  <span id="version">-</span>
+</div>
+<div id="services"></div>
+</body>
+</html>
