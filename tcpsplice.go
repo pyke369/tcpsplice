@@ -12,22 +12,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
 const progname = "tcpsplice"
-const version = "1.0.1"
+const version = "1.0.2"
 
 type Session struct {
-	id, service, source, target                          string
+	id, service, source, target, meta                    string
 	started, active, last                                time.Time
 	sourceRead, targetWritten, targetRead, sourceWritten int64
 	sourceMeanThroughput, targetMeanThroughput           float64
 	sourceLastThroughput, targetLastThroughput           float64
 	loggued, done                                        bool
-	closer                                               chan bool
+	abort                                                chan bool
 }
 
 var (
@@ -54,6 +55,8 @@ func serviceHandler(service string, listener *net.TCPListener) {
 						sessionMinimumSize := config.GetSizeBounds(fmt.Sprintf("services.%s.session_minimum_size", service), 1024, 0, math.MaxInt64)
 						writeTimeout := time.Second * time.Duration(config.GetDurationBounds(fmt.Sprintf("services.%s.write_timeout", service), 10, 2, 60))
 						idleTimeout := time.Second * time.Duration(config.GetDurationBounds(fmt.Sprintf("services.%s.idle_timeout", service), 60, 0, 300))
+						metaSize := int(config.GetSizeBounds(fmt.Sprintf("services.%s.meta_size", service), 16*1024, 0, 64*1024))
+						metaScan, _ := regexp.Compile(config.GetString(fmt.Sprintf("services.%s.meta_scan", service), "["))
 						source.SetReadBuffer(int(incomingSize))
 						source.SetWriteBuffer(int(incomingSize))
 						target.(*net.TCPConn).SetReadBuffer(int(outgoingSize))
@@ -66,7 +69,8 @@ func serviceHandler(service string, listener *net.TCPListener) {
 							started: time.Now(),
 							active:  time.Now(),
 							last:    time.Time{},
-							closer:  make(chan bool, 1),
+							meta:    "-",
+							abort:   make(chan bool, 1),
 						}
 						if logMinimumSize == 0 {
 							session.loggued = true
@@ -77,9 +81,23 @@ func serviceHandler(service string, listener *net.TCPListener) {
 						}
 						go func() {
 							data := make([]byte, incomingSize)
+							meta := make([]byte, 0, metaSize)
 							for {
 								read, err := source.Read(data)
 								if read > 0 {
+									if metaScan != nil && session.meta == "-" && len(meta) < metaSize {
+										length := int(math.Min(float64(read), float64(metaSize-len(meta))))
+										meta = append(meta, data[:length]...)
+										if metaScan.Match(meta) {
+											session.meta = ""
+											for _, part := range metaScan.FindSubmatch(meta)[1:] {
+												session.meta += string(part)
+											}
+											if session.meta == "" {
+												session.meta = "-"
+											}
+										}
+									}
 									session.sourceRead += int64(read)
 									session.active = time.Now()
 									target.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -100,11 +118,25 @@ func serviceHandler(service string, listener *net.TCPListener) {
 							target.Close()
 						}()
 						data := make([]byte, outgoingSize)
+						meta := make([]byte, 0, metaSize)
 						close := false
 						for !close {
 							target.SetReadDeadline(time.Now().Add(time.Second))
 							read, err := target.Read(data)
 							if read > 0 {
+								if metaScan != nil && session.meta == "-" && len(meta) < metaSize {
+									length := int(math.Min(float64(read), float64(metaSize-len(meta))))
+									meta = append(meta, data[:length]...)
+									if metaScan.Match(meta) {
+										session.meta = ""
+										for _, part := range metaScan.FindSubmatch(meta)[1:] {
+											session.meta += string(part)
+										}
+										if session.meta == "" {
+											session.meta = "-"
+										}
+									}
+								}
 								session.targetRead += int64(read)
 								session.active = time.Now()
 								source.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -131,7 +163,7 @@ func serviceHandler(service string, listener *net.TCPListener) {
 								statistics <- session
 							}
 							select {
-							case close = <-session.closer:
+							case close = <-session.abort:
 							default:
 							}
 							if idleTimeout != 0 && time.Now().Sub(session.active) >= idleTimeout {
@@ -187,6 +219,7 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 					"bytes":    [2]int64{session.sourceRead, session.targetRead},
 					"mean":     [2]float64{session.sourceMeanThroughput, session.targetMeanThroughput},
 					"last":     [2]float64{session.sourceLastThroughput, session.targetLastThroughput},
+					"meta":     session.meta,
 					"done":     session.done,
 				}
 			}
@@ -198,13 +231,13 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 		if json, err := json.Marshal(output); err == nil {
 			response.Write(json)
 		}
-	} else if strings.Index(request.URL.Path, "/close/") == 0 {
+	} else if strings.Index(request.URL.Path, "/abort/") == 0 {
 		sessionsLock.RLock()
 		for id, session := range sessions {
 			if id == request.URL.Path[7:] && !session.done {
 				session.done = true
-				session.closer <- true
-				logger.Warn(map[string]interface{}{"type": "close", "id": id, "service": session.service, "source": session.source, "target": session.target})
+				session.abort <- true
+				logger.Warn(map[string]interface{}{"type": "abort", "id": id, "service": session.service, "source": session.source, "target": session.target})
 				break
 			}
 		}
@@ -316,7 +349,7 @@ func main() {
 		case session := <-statistics:
 			sessionsLock.Lock()
 			if sessions[session.id] == nil {
-				sessions[session.id] = &Session{service: session.service, source: session.source, target: session.target, started: session.started, closer: session.closer}
+				sessions[session.id] = &Session{service: session.service, source: session.source, target: session.target, started: session.started, abort: session.abort}
 			}
 			sessionsLock.Unlock()
 			duration := math.Max(float64(time.Now().Sub(session.started))/float64(time.Second), 0.001)
@@ -332,6 +365,7 @@ func main() {
 			}
 			sessions[session.id].last = session.last
 			sessions[session.id].done = session.done
+			sessions[session.id].meta = session.meta
 			sessions[session.id].sourceRead = session.sourceRead
 			sessions[session.id].targetWritten = session.targetWritten
 			sessions[session.id].targetRead = session.targetRead
