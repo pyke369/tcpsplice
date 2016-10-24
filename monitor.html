@@ -79,7 +79,7 @@ body
 {
     background-color: #f0f0f0;
 }
-.session:nth-child(odd) 
+.session:nth-child(odd)
 {
     background-color: #f8f8f8;
 }
@@ -114,6 +114,10 @@ body
 .xlarge
 {
     width: 230px;
+}
+.xxlarge
+{
+    width: 300px;
 }
 .large
 {
@@ -190,7 +194,7 @@ function update()
                 if (ids.length > 0)
                 {
                     services += '<div class="session"><span class="large">source address</span><span class="large">target address</span>' +
-                                '<span class="medium">duration</span><span class="xlarge">uplink &#9650;</span>' +
+                                '<span class="xxlarge">target name</span><span class="small">duration</span><span class="xlarge">uplink &#9650;</span>' +
                                 '<span class="xlarge">downlink &#9660;</span><span class="large">metadata</span><span class="small">abort</span></div>';
                 }
                 else
@@ -201,14 +205,15 @@ function update()
                 {
                     info = sessions[session[0]];
                     services += sprintf('<div class="session%s">' +
-                                        '<span class="large">%s</span><span class="large">%s</span><span class="medium">%s</span>' +
+                                        '<span class="large">%s</span><span class="large">%s</span><span class="xxlarge">%s</span>' +
+                                        '<span class="small">%s</span>' +
                                         '<span class="xlarge">%s - %.1fMbps - %.1fMbps</span>' +
                                         '<span class="xlarge">%s - %.1fMbps - %.1fMbps</span>' +
                                         '<span class="large">%s</span>' +
                                         '<span class="small"><a href="#" onclick="return terminate(\'%s\');">&#10060;</a></span>' +
                                         '</div>',
                                         info.done ? " done" : "",
-                                        info.source, info.target, age(info.duration),
+                                        info.source, info.target, info.targetName, age(info.duration),
                                         size(info.bytes[0]), info.mean[0], info.last[0],
                                         size(info.bytes[1]), info.mean[1], info.last[1],
                                         info.meta, session[0]);

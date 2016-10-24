@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"github.com/pyke369/golang-support/uconfig"
 	"github.com/pyke369/golang-support/ulog"
+	"io/ioutil"
 	"math"
 	"math/rand"
 	"net"
@@ -13,22 +15,28 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const progname = "tcpsplice"
-const version = "1.0.2"
+const version = "1.0.3"
 
 type Session struct {
-	id, service, source, target, meta                    string
+	id, service, source, target, meta, targetName        string
 	started, active, last                                time.Time
 	sourceRead, targetWritten, targetRead, sourceWritten int64
 	sourceMeanThroughput, targetMeanThroughput           float64
 	sourceLastThroughput, targetLastThroughput           float64
 	loggued, done                                        bool
 	abort                                                chan bool
+}
+
+type Backend struct {
+	Fqdn string
+	Port int
 }
 
 var (
@@ -38,15 +46,49 @@ var (
 	statistics   chan *Session
 	sessions     map[string]*Session
 	sessionsLock sync.RWMutex
+	backendsURL  bytes.Buffer
 )
 
 func serviceHandler(service string, listener *net.TCPListener) {
+	//Init service
+	remotes := make([]string, 0)
+	listenPort := listener.Addr().(*net.TCPAddr).Port
+	backendUrl := config.GetString(fmt.Sprintf("services.%s.backend_url", service), "")
+	static := true
+	if strings.EqualFold(config.GetString(fmt.Sprintf("services.%s.remote_type", service), "static"), "dynamic") {
+		logger.Info("%s Service : Dynamic backends are defined", service)
+		//Initializing backends
+		remotes = backendHandler(backendUrl, service, listenPort)
+		if len(remotes) == 0 {
+			logger.Warn("%s Service : Error while initializing Dynamic Backend, switching in static mode", service)
+		} else {
+			// Consider dynamic configuration is working so disabling static mode
+			static = false
+			backendTicker := time.NewTicker(time.Millisecond * 1000)
+			go func() {
+				for {
+					select {
+					case <-backendTicker.C:
+						tmpRemotes := make([]string, 0)
+						tmpRemotes = backendHandler(backendUrl, service, listenPort)
+						if len(tmpRemotes) > 0 {
+							remotes = tmpRemotes
+						}
+					}
+				}
+			}()
+		}
+	}
+	if static {
+		logger.Info("%s Service : Static backends will be used", service)
+		remotes = config.GetPaths(fmt.Sprintf("services.%s.remote", service))
+	}
 	for {
 		if source, err := listener.AcceptTCP(); err == nil {
-			remotes := config.GetPaths(fmt.Sprintf("services.%s.remote", service))
+			logger.Info("%s Service : Start Listening on port %v", service, listenPort)
 			if len(remotes) > 0 {
 				go func() {
-					remote := config.GetString(remotes[rand.Int31n(int32(len(remotes)))], "")
+					remote := remotes[rand.Int31n(int32(len(remotes)))]
 					if target, err := net.DialTimeout("tcp", remote,
 						time.Second*time.Duration(config.GetDurationBounds(fmt.Sprintf("services.%s.connect_timeout", service), 10, 2, 60))); err == nil {
 						incomingSize := config.GetSizeBounds(fmt.Sprintf("services.%s.incoming_buffer_size", service), 64*1024, 4*1024, 512*1024)
@@ -62,19 +104,20 @@ func serviceHandler(service string, listener *net.TCPListener) {
 						target.(*net.TCPConn).SetReadBuffer(int(outgoingSize))
 						target.(*net.TCPConn).SetWriteBuffer(int(outgoingSize))
 						session := &Session{
-							id:      fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%s%s", source.RemoteAddr(), target.RemoteAddr())))),
-							service: service,
-							source:  fmt.Sprintf("%s", source.RemoteAddr()),
-							target:  fmt.Sprintf("%s", target.RemoteAddr()),
-							started: time.Now(),
-							active:  time.Now(),
-							last:    time.Time{},
-							meta:    "-",
-							abort:   make(chan bool, 1),
+							id:         fmt.Sprintf("%x", md5.Sum([]byte(fmt.Sprintf("%s%s", source.RemoteAddr(), target.RemoteAddr())))),
+							service:    service,
+							source:     fmt.Sprintf("%s", source.RemoteAddr()),
+							target:     fmt.Sprintf("%s", target.RemoteAddr()),
+							targetName: strings.Split(remote, ":")[0],
+							started:    time.Now(),
+							active:     time.Now(),
+							last:       time.Time{},
+							meta:       "-",
+							abort:      make(chan bool, 1),
 						}
 						if logMinimumSize == 0 {
 							session.loggued = true
-							logger.Info(map[string]interface{}{"type": "splice", "id": session.id, "service": service, "source": session.source, "target": session.target})
+							logger.Info(map[string]interface{}{"type": "splice", "id": session.id, "service": service, "source": session.source, "target": session.target, "targetName": session.targetName})
 						}
 						if sessionMinimumSize == 0 {
 							statistics <- session
@@ -106,7 +149,7 @@ func serviceHandler(service string, listener *net.TCPListener) {
 										session.targetWritten += int64(written)
 									}
 									if err != nil {
-										logger.Warn(map[string]interface{}{"type": "error", "id": session.id, "service": service, "source": session.source, "target": session.target, "error": "target write timeout"})
+										logger.Warn(map[string]interface{}{"type": "error", "id": session.id, "service": service, "source": session.source, "target": session.target, "targetName": session.targetName, "error": "target write timeout"})
 										break
 									}
 								}
@@ -156,7 +199,7 @@ func serviceHandler(service string, listener *net.TCPListener) {
 							}
 							if !session.loggued && (session.targetWritten >= logMinimumSize || session.sourceWritten >= logMinimumSize) {
 								session.loggued = true
-								logger.Info(map[string]interface{}{"type": "splice", "id": session.id, "service": service, "source": session.source, "target": session.target})
+								logger.Info(map[string]interface{}{"type": "splice", "id": session.id, "service": service, "source": session.source, "target": session.target, "targetName": session.targetName})
 							}
 							if (session.targetWritten >= sessionMinimumSize || session.sourceWritten >= sessionMinimumSize) && time.Now().Sub(session.last) >= time.Second*2 {
 								session.last = time.Now()
@@ -212,15 +255,16 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 			sessionsLock.RLock()
 			for id, session := range sessions {
 				s[id] = map[string]interface{}{
-					"started":  session.started.Unix(),
-					"duration": time.Now().Sub(session.started) / time.Second,
-					"source":   session.source,
-					"target":   session.target,
-					"bytes":    [2]int64{session.sourceRead, session.targetRead},
-					"mean":     [2]float64{session.sourceMeanThroughput, session.targetMeanThroughput},
-					"last":     [2]float64{session.sourceLastThroughput, session.targetLastThroughput},
-					"meta":     session.meta,
-					"done":     session.done,
+					"started":    session.started.Unix(),
+					"duration":   time.Now().Sub(session.started) / time.Second,
+					"source":     session.source,
+					"target":     session.target,
+					"targetName": session.targetName,
+					"bytes":      [2]int64{session.sourceRead, session.targetRead},
+					"mean":       [2]float64{session.sourceMeanThroughput, session.targetMeanThroughput},
+					"last":       [2]float64{session.sourceLastThroughput, session.targetLastThroughput},
+					"meta":       session.meta,
+					"done":       session.done,
 				}
 			}
 			sessionsLock.RUnlock()
@@ -244,7 +288,8 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 		sessionsLock.RUnlock()
 	} else {
 		response.Header().Set("Content-Type", "text/html; charset=utf-8")
-		response.Write(monitorContent)
+		monitorFile, _ := ioutil.ReadFile("monitor.html")
+		response.Write(monitorFile)
 	}
 }
 
@@ -294,6 +339,36 @@ func baseHandler(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(response, request)
 	})
+}
+
+func backendHandler(backendUrl string, service string, port int) []string {
+	backends := make([]Backend, 0)
+	backendArray := make([]string, 0)
+	//Makes HTTP request
+	resp, err := http.Get(backendUrl)
+	defer resp.Body.Close()
+	if err != nil {
+		logger.Warn("%s Service : %s", service, err)
+		return backendArray
+	}
+	// Parses JSON response into
+	err = json.NewDecoder(resp.Body).Decode(&backends)
+	if err != nil {
+		logger.Warn("%s Service : %s", service, err)
+		return backendArray
+	}
+	// Converts Backend Array to String Array Containing URLs
+	for _, backend := range backends {
+		if backend.Port == 0 {
+			backend.Port = port
+		}
+		var backendRTMPUrl bytes.Buffer
+		backendRTMPUrl.WriteString(backend.Fqdn)
+		backendRTMPUrl.WriteString(":")
+		backendRTMPUrl.WriteString(strconv.Itoa(backend.Port))
+		backendArray = append(backendArray, backendRTMPUrl.String())
+	}
+	return backendArray
 }
 
 func main() {
@@ -349,7 +424,7 @@ func main() {
 		case session := <-statistics:
 			sessionsLock.Lock()
 			if sessions[session.id] == nil {
-				sessions[session.id] = &Session{service: session.service, source: session.source, target: session.target, started: session.started, abort: session.abort}
+				sessions[session.id] = &Session{service: session.service, source: session.source, target: session.target, targetName: session.targetName, started: session.started, abort: session.abort}
 			}
 			sessionsLock.Unlock()
 			duration := math.Max(float64(time.Now().Sub(session.started))/float64(time.Second), 0.001)
