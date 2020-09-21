@@ -1,2 +1,7 @@
 tcpsplice
 monitor.go
+debian/tcpsplice
+debian/*debhelper*
+debian/*substvars*
+debian/files
+_*

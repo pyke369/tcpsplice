@@ -1,4 +1,4 @@
-## tcpsplice        [![Build Status](https://travis-ci.org/pyke369/tcpsplice.svg?branch=master)](https://travis-ci.org/pyke369/tcpsplice)
+## tcpsplice
 
 ![Chain Of Gophers](/images/chain.jpg?raw=true "Chain Of Gophers")
 
@@ -6,7 +6,7 @@
 
 ## Requirements
 
-`tcpsplice` only requires a recent Golang compiler (1.6+).
+`tcpsplice` only requires a recent Golang compiler (1.15+).
 
 ## Build
 
@@ -37,7 +37,7 @@ You may optionally build a Debian package by typing the following command at the
 The `tcpsplice` binary will be installed by the package in the `/usr/sbin` directory, with additional
 startup scripts and a default configuration file in `/etc/tcpsplice.conf`.
 
-    $ sudo dpkg -i tcpsplice_1.0.2_amd64.deb
+    $ sudo dpkg -i tcpsplice_1.1.0_amd64.deb
     Selecting previously unselected package tcpsplice.
-    Unpacking tcpsplice (from tcpsplice_1.0.2_amd64.deb) ...
-    Setting up tcpsplice (1.0.2) ...
+    Unpacking tcpsplice (from tcpsplice_1.1.0_amd64.deb) ...
+    Setting up tcpsplice (1.1.0) ...

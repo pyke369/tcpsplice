@@ -1,4 +1,4 @@
-# tcpsplice base configuration
+# base configuration
 
 ENABLED=1
-# CONFIGURATION="/etc/tcpsplice.conf"
+CONFIGURATION="/etc/tcpsplice.conf"

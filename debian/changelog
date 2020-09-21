@@ -1,3 +1,9 @@
+tcpsplice (1.1.0) stable; urgency=medium
+
+  * update to Go 1.15 (and Go modules)
+
+ -- Pierre-Yves Kerembellec <py.kerembellec@gmail.com>  Mon, 21 Sep 2020 18:10:58 +0200
+
 tcpsplice (1.0.2) stable; urgency=medium
 
   * add arbitrary metadata scan (+ display on monitoring screen)

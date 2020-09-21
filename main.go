@@ -19,7 +19,7 @@ import (
 )
 
 const progname = "tcpsplice"
-const version = "1.0.2"
+const version = "1.1.0"
 
 type Session struct {
 	id, service, source, target, meta                    string
