@@ -1,5 +1,5 @@
-module tcpsplice
+module main
 
 go 1.15
 
-require github.com/pyke369/golang-support v0.0.0-20200321184731-cd1ed731523d
+require github.com/pyke369/golang-support v0.0.0-20210211171524-9d13f1802e2b

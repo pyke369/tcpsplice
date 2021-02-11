@@ -1,3 +1,9 @@
+tcpsplice (1.2.0) stable; urgency=medium
+
+  * add native TLS support and modernize software packaging
+
+ -- Pierre-Yves Kerembellec <py.kerembellec@gmail.com>  Thu, 11 Feb 2021 16:45:09 +0100
+
 tcpsplice (1.1.0) stable; urgency=medium
 
   * update to Go 1.15 (and Go modules)

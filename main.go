@@ -2,10 +2,9 @@ package main
 
 import (
 	"crypto/md5"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"github.com/pyke369/golang-support/uconfig"
-	"github.com/pyke369/golang-support/ulog"
 	"math"
 	"math/rand"
 	"net"
@@ -16,10 +15,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pyke369/golang-support/dynacert"
+	"github.com/pyke369/golang-support/uconfig"
+	"github.com/pyke369/golang-support/ulog"
 )
 
 const progname = "tcpsplice"
-const version = "1.1.0"
+const version = "1.2.0"
 
 type Session struct {
 	id, service, source, target, meta                    string
@@ -40,9 +43,9 @@ var (
 	sessionsLock sync.RWMutex
 )
 
-func serviceHandler(service string, listener *net.TCPListener) {
+func serviceHandler(service string, listener net.Listener) {
 	for {
-		if source, err := listener.AcceptTCP(); err == nil {
+		if source, err := listener.Accept(); err == nil {
 			remotes := config.GetPaths(fmt.Sprintf("services.%s.remote", service))
 			if len(remotes) > 0 {
 				go func() {
@@ -57,8 +60,10 @@ func serviceHandler(service string, listener *net.TCPListener) {
 						idleTimeout := time.Second * time.Duration(config.GetDurationBounds(fmt.Sprintf("services.%s.idle_timeout", service), 60, 0, 300))
 						metaSize := int(config.GetSizeBounds(fmt.Sprintf("services.%s.meta_size", service), 16*1024, 0, 64*1024))
 						metaScan, _ := regexp.Compile(config.GetString(fmt.Sprintf("services.%s.meta_scan", service), "["))
-						source.SetReadBuffer(int(incomingSize))
-						source.SetWriteBuffer(int(incomingSize))
+						if tsource, ok := source.(*net.TCPConn); ok {
+							tsource.SetReadBuffer(int(incomingSize))
+							tsource.SetWriteBuffer(int(incomingSize))
+						}
 						target.(*net.TCPConn).SetReadBuffer(int(outgoingSize))
 						target.(*net.TCPConn).SetWriteBuffer(int(outgoingSize))
 						session := &Session{
@@ -208,23 +213,25 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 		services := map[string]interface{}{}
 		for _, service := range config.GetPaths("services") {
 			service = strings.TrimPrefix(service, "services.")
-			s := map[string]interface{}{}
+			entries := map[string]interface{}{}
 			sessionsLock.RLock()
 			for id, session := range sessions {
-				s[id] = map[string]interface{}{
-					"started":  session.started.Unix(),
-					"duration": time.Now().Sub(session.started) / time.Second,
-					"source":   session.source,
-					"target":   session.target,
-					"bytes":    [2]int64{session.sourceRead, session.targetRead},
-					"mean":     [2]float64{session.sourceMeanThroughput, session.targetMeanThroughput},
-					"last":     [2]float64{session.sourceLastThroughput, session.targetLastThroughput},
-					"meta":     session.meta,
-					"done":     session.done,
+				if session.service == service {
+					entries[id] = map[string]interface{}{
+						"started":  session.started.Unix(),
+						"duration": time.Now().Sub(session.started) / time.Second,
+						"source":   session.source,
+						"target":   session.target,
+						"bytes":    [2]int64{session.sourceRead, session.targetRead},
+						"mean":     [2]float64{session.sourceMeanThroughput, session.targetMeanThroughput},
+						"last":     [2]float64{session.sourceLastThroughput, session.targetLastThroughput},
+						"meta":     session.meta,
+						"done":     session.done,
+					}
 				}
 			}
 			sessionsLock.RUnlock()
-			services[service] = s
+			services[service] = entries
 		}
 		output["services"] = services
 		response.Header().Set("Content-Type", "application/json")
@@ -242,9 +249,6 @@ func monitorHandler(response http.ResponseWriter, request *http.Request) {
 			}
 		}
 		sessionsLock.RUnlock()
-	} else {
-		response.Header().Set("Content-Type", "text/html; charset=utf-8")
-		response.Write(monitorContent)
 	}
 }
 
@@ -315,21 +319,27 @@ func main() {
 	for _, service := range config.GetPaths("services") {
 		for _, local := range config.GetPaths(fmt.Sprintf("%s.local", service)) {
 			service = strings.TrimPrefix(service, "services.")
-			local = config.GetString(local, "")
-			if address, err := net.ResolveTCPAddr("tcp", strings.TrimLeft(local, "*")); err == nil {
-				if listener, err := net.ListenTCP("tcp", address); err == nil {
-					logger.Info(map[string]interface{}{"type": "service", "name": service, "listen": local})
+			if parts := strings.Split(config.GetStringMatch(local, "_", "^.*?(:\\d+)?((,[^,]+){2})?$"), ","); parts[0] != "_" {
+				if listener, err := net.Listen("tcp", strings.TrimLeft(parts[0], "*")); err == nil {
+					if len(parts) > 1 {
+						loader := &dynacert.DYNACERT{Public: parts[1], Key: parts[2]}
+						listener = tls.NewListener(listener, dynacert.IntermediateTLSConfig(loader.GetCertificate))
+						logger.Info(map[string]interface{}{"type": "service", "name": service, "listen": parts[0], "cert": parts[1], "key": parts[2]})
+					} else {
+						logger.Info(map[string]interface{}{"type": "service", "name": service, "listen": parts[0]})
+					}
 					go serviceHandler(service, listener)
 				} else {
-					logger.Warn(map[string]interface{}{"type": "service", "name": service, "listen": local, "error": err})
+					logger.Warn(map[string]interface{}{"type": "service", "name": service, "listen": parts[0], "error": err})
 				}
-			} else {
-				logger.Warn(map[string]interface{}{"type": "service", "name": service, "listen": local, "error": err})
 			}
 		}
 	}
 
-	http.Handle("/", baseHandler(http.HandlerFunc(monitorHandler)))
+	http.Handle("/sessions.json", baseHandler(http.HandlerFunc(monitorHandler)))
+	http.Handle("/abort/", baseHandler(http.HandlerFunc(monitorHandler)))
+	http.Handle("/", baseHandler(http.StripPrefix("/", Resources(6*time.Hour))))
+
 	if parts := strings.Split(config.GetStringMatch("monitor.listen", "_", "^(?:\\*|\\d+(?:\\.\\d+){3}|\\[[^\\]]+\\])(?::\\d+)?(?:(?:,[^,]+){2})?$"), ","); parts[0] != "_" {
 		server := &http.Server{Addr: strings.TrimLeft(parts[0], "*")}
 		if len(parts) > 1 {

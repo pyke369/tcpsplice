@@ -1,5 +1,5 @@
 tcpsplice
-monitor.go
+static.go
 debian/tcpsplice
 debian/*debhelper*
 debian/*substvars*

@@ -1,2 +1,2 @@
 tcpsplice usr/bin
-tcpsplice.conf etc
+conf/tcpsplice.conf etc

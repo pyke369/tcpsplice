@@ -1,16 +1,23 @@
 #!/bin/sh
 
-tcpsplice: *.go monitor.html
-	@(echo -n "package main\nimport \"encoding/base64\"\nconst _monitorContent = \""; base64 -w 0 < monitor.html; echo "\"\nvar monitorContent []byte\nfunc init() { monitorContent, _ = base64.StdEncoding.DecodeString(_monitorContent) }") >monitor.go
-	@export GOPATH=/tmp/go; export CGO_ENABLED=0; go build -trimpath -o tcpsplice && strip tcpsplice
+# build targets
+tcpsplice: static.go main.go
+	@env GOPATH=/tmp/go CGO_ENABLED=0 go build -trimpath -o tcpsplice
+	@-strip tcpsplice 2>/dev/null || true
+	@-upx -9 tcpsplice 2>/dev/null || true
+static.go: rpack
+	@-./rpack static
+rpack:
+	@-env GOBIN=`pwd` go get github.com/pyke369/golang-support/rpack/rpack
 clean:
 distclean:
-	@rm -rf tcpsplice monitor.go
+	@rm -rf tcpsplice static.go rpack
 deb:
 	@debuild -e GOROOT -e GOPATH -e PATH -i -us -uc -b
 debclean:
 	@debuild -- clean
 	@rm -f ../tcpsplice_*
 
+# run targets
 run: tcpsplice
-	@./tcpsplice tcpsplice.conf
+	@./tcpsplice conf/tcpsplice.conf
