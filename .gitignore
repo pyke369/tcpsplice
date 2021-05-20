@@ -1,7 +1,7 @@
+_*
 tcpsplice
 static.go
-debian/tcpsplice
-debian/*debhelper*
-debian/*substvars*
+rpack
+debian/tcpsplice*deb*
+debian/tcpsplice*var*
 debian/files
-_*

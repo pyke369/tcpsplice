@@ -1,0 +1,3 @@
+tcpsplice usr/bin
+conf/tcpsplice.conf etc/tcpsplice
+conf/*.pem etc/tcpsplice
