@@ -212,8 +212,6 @@ func monitor_run() {
 				abort:   session.abort,
 			}
 		}
-		lock.Unlock()
-
 		duration := math.Max(float64(time.Now().Sub(session.started))/float64(time.Second), 0.001)
 		session.smetrics.mean = math.Floor(float64(session.tmetrics.write*8)/(duration*1000)) / 1000
 		session.tmetrics.mean = math.Floor(float64(session.smetrics.write*8)/(duration*1000)) / 1000
@@ -236,5 +234,6 @@ func monitor_run() {
 		sessions[id].tmetrics.write = session.tmetrics.write
 		sessions[id].tmetrics.mean = session.tmetrics.mean
 		sessions[id].tmetrics.last = session.tmetrics.last
+		lock.Unlock()
 	}
 }
