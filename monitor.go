@@ -159,7 +159,8 @@ func monitor_run() {
 						TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){},
 					}
 					if len(parts) > 1 {
-						certificate := &dynacert.DYNACERT{Public: parts[1], Key: parts[2]}
+						certificate := &dynacert.DYNACERT{}
+						certificate.Add("*", parts[1], parts[2])
 						server.TLSConfig = dynacert.IntermediateTLSConfig(certificate.GetCertificate)
 						go func(server *http.Server, parts []string) {
 							logger.Info(map[string]interface{}{"scope": "monitor", "event": "listen", "listen": parts[0], "certificate": strings.Join(parts[1:], ",")})

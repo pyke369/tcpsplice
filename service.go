@@ -53,8 +53,9 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 		}
 
 		rscan := config.GetString(prefix+"scan.1", "")
-		ssize := config.GetSizeBounds(prefix+"size.source", 128<<10, 4<<10, 512<<10)
-		tsize := config.GetSizeBounds(prefix+"size.target", 128<<10, 4<<10, 512<<10)
+		ssize := config.GetSizeBounds(prefix+"size.source", 0, 4<<10, 8<<20)
+		tsize := config.GetSizeBounds(prefix+"size.target", 0, 4<<10, 8<<20)
+		bsize := config.GetSizeBounds(prefix+"size.buffer", 128<<10, 4<<10, 8<<20)
 		csize := config.GetSizeBounds(prefix+"size.session", 16<<10, 0, math.MaxInt64)
 		lsize := config.GetSizeBounds(prefix+"size.log", 16<<10, 0, math.MaxInt64)
 		osize := int(config.GetSizeBounds(prefix+"size.opaque", 16<<10, 0, 64<<10))
@@ -67,8 +68,10 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				err    error
 			)
 
-			source.(*net.TCPConn).SetReadBuffer(int(ssize))
-			source.(*net.TCPConn).SetWriteBuffer(int(ssize))
+			if ssize != 0 {
+				source.(*net.TCPConn).SetReadBuffer(int(ssize))
+				source.(*net.TCPConn).SetWriteBuffer(int(ssize))
+			}
 			if secure {
 				if certificate, err := tls.LoadX509KeyPair(certificate[0], certificate[1]); err == nil {
 					source.SetDeadline(time.Now().Add(wtimeout))
@@ -118,8 +121,10 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 					time.Sleep(time.Second)
 					continue
 				}
-				target.(*net.TCPConn).SetReadBuffer(int(tsize))
-				target.(*net.TCPConn).SetWriteBuffer(int(tsize))
+				if tsize != 0 {
+					target.(*net.TCPConn).SetReadBuffer(int(tsize))
+					target.(*net.TCPConn).SetWriteBuffer(int(tsize))
+				}
 				if len(parts) > 1 && parts[0] == "tls" {
 					target.SetDeadline(time.Now().Add(wtimeout))
 					sconn := tls.Client(target, &tls.Config{InsecureSkipVerify: true})
@@ -166,7 +171,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 			}
 
 			go func() {
-				data, opaque, scan := make([]byte, ssize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "["))
+				data, opaque, scan := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "["))
 				for {
 					read, err := source.Read(data)
 					if read > 0 {
@@ -205,7 +210,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				target.Close()
 			}()
 
-			data, opaque, scan, close := make([]byte, tsize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "[")), false
+			data, opaque, scan, close := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "[")), false
 			for !close {
 				target.SetReadDeadline(time.Now().Add(time.Second))
 				read, err := target.Read(data)

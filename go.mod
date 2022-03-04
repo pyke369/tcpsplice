@@ -1,8 +1,7 @@
 module main
 
-go 1.15
+go 1.17
 
-require (
-	github.com/pyke369/golang-support v0.0.0-20210608080034-9a124c2a4c97
-	golang.org/x/sys v0.0.0-20210521203332-0cec03c779c1 // indirect
-)
+require github.com/pyke369/golang-support v0.0.0-20220213172949-676c1a44f824
+
+require golang.org/x/sys v0.0.0-20220227234510-4e6760a101f9 // indirect
