@@ -17,9 +17,8 @@ import (
 )
 
 type LISTENER struct {
-	handle   *listener.TCPListener
-	seen     time.Time
-	shutdown bool
+	handle *listener.TCPListener
+	seen   time.Time
 }
 
 type METRICS struct {
@@ -109,7 +108,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				}
 				start := time.Now()
 				if target, err = net.DialTimeout("tcp", remote, ctimeout); err != nil {
-					ctimeout -= time.Now().Sub(start) + time.Second
+					ctimeout -= time.Since(start) + time.Second
 					if ctimeout < 2*time.Second {
 						logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "name": name, "secure": secure,
 							"source": source.RemoteAddr().String(), "local": source.LocalAddr().String(), "target": remote, "error": fmt.Sprintf("%v", err)})
@@ -252,7 +251,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 						"source": session.source, "local": session.local, "target": session.target})
 					session.loggued = true
 				}
-				if (session.tmetrics.write >= csize || session.smetrics.write >= csize) && time.Now().Sub(session.update) >= time.Second*2 {
+				if (session.tmetrics.write >= csize || session.smetrics.write >= csize) && time.Since(session.update) >= time.Second*2 {
 					session.update = time.Now()
 					update <- session
 				}
@@ -260,7 +259,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				case close = <-session.abort:
 				default:
 				}
-				if itimeout != 0 && time.Now().Sub(session.active) >= itimeout {
+				if itimeout != 0 && time.Since(session.active) >= itimeout {
 					logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "id": session.id, "name": name, "secure": secure,
 						"source": session.source, "local": session.local, "target": session.target, "error": "idle timeout"})
 					close = true
@@ -270,7 +269,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 			target.Close()
 
 			if session.tmetrics.write >= lsize || session.smetrics.write >= lsize {
-				duration := math.Max(float64(time.Now().Sub(session.started))/float64(time.Second), 0.001)
+				duration := math.Max(float64(time.Since(session.started))/float64(time.Second), 0.001)
 				logger.Info(map[string]interface{}{"scope": "service", "event": "unsplice", "id": session.id, "name": name,
 					"source": session.source, "local": session.local, "target": session.target,
 					"duration": math.Floor(duration*1000) / 1000, "bytes": [2]int64{session.tmetrics.write, session.smetrics.write},
@@ -327,7 +326,7 @@ func service_run() {
 		time.Sleep(time.Second)
 
 		for key, listener := range listeners {
-			if time.Now().Sub(listener.seen) >= 5*time.Second || unbind {
+			if time.Since(listener.seen) >= 5*time.Second || unbind {
 				if listener.handle != nil {
 					listener.handle.Close()
 					listener.handle = nil

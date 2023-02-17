@@ -1,7 +1,7 @@
-_*
 tcpsplice
-static.go
+resources.go
 rpack
 debian/tcpsplice*deb*
 debian/tcpsplice*var*
 debian/files
+_*

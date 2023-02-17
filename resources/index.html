@@ -58,9 +58,7 @@ a:hover {
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='currentColor' viewBox='0 0 16 16'><path fill-rule='evenodd' d='M1 8a7 7 0 1 0 14 0A7 7 0 0 0 1 8zm15 0A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM8.5 4.5a.5.5 0 0 0-1 0v5.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V4.5z'/></svg>");
 }
 </style>
-<script src="/vendor/jquery-3.6.0.js"></script>
-<script src="/vendor/sprintf-1.1.2.js"></script>
-<script src="/vendor/bootstrap-5.0.0.js"></script>
+<script src="/vendor/jquery-3.6.0.js+sprintf-1.1.2.js+bootstrap-5.0.0.js"></script>
 </head>
 
 <body>
@@ -211,7 +209,7 @@ function update() {
                         '</tr>',
                         info.done ? 'table-warning' : (info.spliced ? 'table-primary' : ''),
                         info.secure ? 'secure' : 'unsecure',
-                        info.multi > 1 ? 'bg-success' : 'bg-light text-dark', info.multi, 
+                        info.multi > 1 ? 'bg-success' : 'bg-light text-dark', info.multi,
                         info.source, info.local, info.target, hduration(info.duration),
                         hsize(info.bytes[0]), hbandwidth(info.mean[0]), hbandwidth(info.last[0]),
                         hsize(info.bytes[1]), hbandwidth(info.mean[1]), hbandwidth(info.last[1]),

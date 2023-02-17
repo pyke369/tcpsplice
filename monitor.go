@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"math"
 	"net"
@@ -72,7 +72,7 @@ func monitor_handle(response http.ResponseWriter, request *http.Request) {
 		output := map[string]interface{}{
 			"server": map[string]interface{}{
 				"version": version,
-				"uptime":  time.Now().Sub(started) / time.Second,
+				"uptime":  time.Since(started) / time.Second,
 			},
 		}
 		services := map[string]interface{}{}
@@ -84,7 +84,7 @@ func monitor_handle(response http.ResponseWriter, request *http.Request) {
 				if session.name == name {
 					entries[id] = map[string]interface{}{
 						"started":  session.started.Unix(),
-						"duration": time.Now().Sub(session.started) / time.Second,
+						"duration": time.Since(session.started) / time.Second,
 						"source":   session.source,
 						"local":    session.local,
 						"target":   session.target,
@@ -127,7 +127,7 @@ func monitor_run() {
 	handler := http.NewServeMux()
 	handler.HandleFunc("/sessions.json", monitor_handle)
 	handler.HandleFunc("/abort/", monitor_handle)
-	handler.Handle("/", http.StripPrefix("/", Resources(6*time.Hour)))
+	handler.Handle("/", http.StripPrefix("/", ResourcesHandler(6*time.Hour)))
 
 	go func() {
 		var server *http.Server
@@ -152,7 +152,7 @@ func monitor_run() {
 					key, server = value, &http.Server{
 						Addr:         strings.TrimLeft(parts[0], "*"),
 						Handler:      handler,
-						ErrorLog:     log.New(ioutil.Discard, "", 0),
+						ErrorLog:     log.New(io.Discard, "", 0),
 						ReadTimeout:  10 * time.Second,
 						WriteTimeout: 10 * time.Second,
 						IdleTimeout:  30 * time.Second,
@@ -184,7 +184,7 @@ func monitor_run() {
 			count := 0
 			lock.Lock()
 			for id, session := range sessions {
-				if time.Now().Sub(session.update) >= 3*time.Second {
+				if time.Since(session.update) >= 3*time.Second {
 					delete(sessions, id)
 					count++
 				}
@@ -213,7 +213,7 @@ func monitor_run() {
 				abort:   session.abort,
 			}
 		}
-		duration := math.Max(float64(time.Now().Sub(session.started))/float64(time.Second), 0.001)
+		duration := math.Max(float64(time.Since(session.started))/float64(time.Second), 0.001)
 		session.smetrics.mean = math.Floor(float64(session.tmetrics.write*8)/(duration*1000)) / 1000
 		session.tmetrics.mean = math.Floor(float64(session.smetrics.write*8)/(duration*1000)) / 1000
 		if !session.update.IsZero() && !sessions[id].update.IsZero() {
