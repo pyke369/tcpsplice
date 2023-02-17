@@ -5,16 +5,27 @@ import (
 	"crypto/tls"
 	"fmt"
 	"math"
-	"math/rand"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/pyke369/golang-support/acl"
 	"github.com/pyke369/golang-support/listener"
 	"github.com/pyke369/golang-support/rcache"
 	"github.com/pyke369/golang-support/uconfig"
 	"github.com/pyke369/golang-support/uuid"
 )
+
+var (
+	serviceBlacklist = map[string]*BLACKLIST{}
+	serviceLock      sync.Mutex
+)
+
+type BLACKLIST struct {
+	reason   string
+	deadline time.Time
+}
 
 type LISTENER struct {
 	handle *listener.TCPListener
@@ -37,29 +48,30 @@ type SESSION struct {
 	abort                   chan bool
 }
 
-func service_handle(name string, certificate []string, listener net.Listener) {
-	prefix, secure := progname+".service."+name+".", len(certificate) == 2
+func serviceHandle(name string, certificate []string, listener net.Listener) {
+	prefix, secure := PROGNAME+".service."+name+".", len(certificate) == 2
 
 	for {
 		source, err := listener.Accept()
 		if err != nil {
 			break
 		}
-		targets := config.GetPaths(prefix + "target")
+		targets := Config.GetPaths(prefix + "target")
 		if len(targets) == 0 {
 			source.Close()
 			continue
 		}
 
-		rscan := config.GetString(prefix+"scan.1", "")
-		ssize := config.GetSizeBounds(prefix+"size.source", 0, 4<<10, 8<<20)
-		tsize := config.GetSizeBounds(prefix+"size.target", 0, 4<<10, 8<<20)
-		bsize := config.GetSizeBounds(prefix+"size.buffer", 128<<10, 4<<10, 8<<20)
-		csize := config.GetSizeBounds(prefix+"size.session", 16<<10, 0, math.MaxInt64)
-		lsize := config.GetSizeBounds(prefix+"size.log", 16<<10, 0, math.MaxInt64)
-		osize := int(config.GetSizeBounds(prefix+"size.opaque", 16<<10, 0, 64<<10))
-		wtimeout := uconfig.Duration(config.GetDurationBounds(prefix+"timeout.write", 10, 1, 60))
-		itimeout := uconfig.Duration(config.GetDurationBounds(prefix+"timeout.idle", 20, 0, 300))
+		rscan := Config.GetString(prefix+"scan.1", "")
+		ssize := int(Config.GetSizeBounds(prefix+"size.source", 0, 4<<10, 8<<20))
+		tsize := int(Config.GetSizeBounds(prefix+"size.target", 0, 4<<10, 8<<20))
+		bsize := Config.GetSizeBounds(prefix+"size.buffer", 128<<10, 4<<10, 8<<20)
+		csize := Config.GetSizeBounds(prefix+"size.session", 16<<10, 0, math.MaxInt64)
+		lsize := Config.GetSizeBounds(prefix+"size.log", 16<<10, 0, math.MaxInt64)
+		osize := int(Config.GetSizeBounds(prefix+"size.opaque", 16<<10, 0, 64<<10))
+		wtimeout := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.write", 10, 1, 30))
+		itimeout := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.idle", 7, 0, 30))
+		btimeout := Config.GetDurationBounds(prefix+"timeout.blacklist", 45, 10, 300)
 
 		go func() {
 			var (
@@ -68,8 +80,8 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 			)
 
 			if ssize != 0 {
-				source.(*net.TCPConn).SetReadBuffer(int(ssize))
-				source.(*net.TCPConn).SetWriteBuffer(int(ssize))
+				source.(*net.TCPConn).SetReadBuffer(ssize)
+				source.(*net.TCPConn).SetWriteBuffer(ssize)
 			}
 			if secure {
 				if certificate, err := tls.LoadX509KeyPair(certificate[0], certificate[1]); err == nil {
@@ -99,30 +111,58 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				}
 			}
 
-			ctimeout := uconfig.Duration(config.GetDurationBounds(prefix+"timeout.connect", 10, 1, 60))
-			for {
-				remote := config.GetString(targets[rand.Int31n(int32(len(targets)))], "")
+			ctimeout, index, remote := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.connect", 10, 1, 30)), 0, ""
+			for index, remote = range targets {
+				remote = Config.GetString(remote, "")
 				parts := strings.SplitN(remote, "@", 2)
 				if len(parts) > 1 && parts[0] == "tls" {
 					remote = parts[1]
 				}
-				start := time.Now()
-				if target, err = net.DialTimeout("tcp", remote, ctimeout); err != nil {
-					ctimeout -= time.Since(start) + time.Second
-					if ctimeout < 2*time.Second {
-						logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "name": name, "secure": secure,
-							"source": source.RemoteAddr().String(), "local": source.LocalAddr().String(), "target": remote, "error": fmt.Sprintf("%v", err)})
+				serviceLock.Lock()
+				if blacklist := serviceBlacklist[remote]; blacklist != nil && time.Now().Before(blacklist.deadline) {
+					Logger.Warn(map[string]any{
+						"scope": "service", "event": "skip", "service": name, "remote": remote,
+						"reason": blacklist.reason, "remaining": blacklist.deadline.Sub(time.Now()) / time.Second,
+					})
+					serviceLock.Unlock()
+					if index >= len(targets)-1 {
+						Logger.Error(map[string]any{
+							"scope": "service", "event": "error", "service": name,
+							"source": source.RemoteAddr().String(), "error": "no available target",
+						})
 						source.Close()
 						return
 					}
-					logger.Warn(map[string]interface{}{"scope": "service", "event": "retry", "name": name, "secure": secure,
-						"source": source.RemoteAddr().String(), "local": source.LocalAddr().String(), "target": remote, "error": fmt.Sprintf("%v", err)})
-					time.Sleep(time.Second)
+					continue
+				}
+				serviceLock.Unlock()
+				start := time.Now()
+				if target, err = net.DialTimeout("tcp", remote, time.Duration(math.Max(float64(time.Second), float64(ctimeout)/float64(len(targets))))); err != nil {
+					Logger.Warn(map[string]any{
+						"scope": "service", "event": "blacklist", "service": name,
+						"remote": remote, "reason": "connect", "duration": int(btimeout),
+					})
+					serviceLock.Lock()
+					serviceBlacklist[remote] = &BLACKLIST{reason: "connection error", deadline: time.Now().Add(uconfig.Duration(btimeout))}
+					serviceLock.Unlock()
+					ctimeout -= time.Since(start)
+					if ctimeout <= 0 || index >= len(targets)-1 {
+						Logger.Error(map[string]any{
+							"scope": "service", "event": "error", "service": name,
+							"source": source.RemoteAddr().String(), "target": remote, "error": fmt.Sprintf("%v", err),
+						})
+						source.Close()
+						return
+					}
+					Logger.Warn(map[string]any{
+						"scope": "service", "event": "retry", "service": name,
+						"source": source.RemoteAddr().String(), "target": remote, "error": fmt.Sprintf("%v", err),
+					})
 					continue
 				}
 				if tsize != 0 {
-					target.(*net.TCPConn).SetReadBuffer(int(tsize))
-					target.(*net.TCPConn).SetWriteBuffer(int(tsize))
+					target.(*net.TCPConn).SetReadBuffer(tsize)
+					target.(*net.TCPConn).SetWriteBuffer(tsize)
 				}
 				if len(parts) > 1 && parts[0] == "tls" {
 					target.SetDeadline(time.Now().Add(wtimeout))
@@ -150,27 +190,20 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				multi:   1,
 				abort:   make(chan bool, 1),
 			}
-			if remote, _, err := net.SplitHostPort(session.source); err == nil {
-				if remote := net.ParseIP(remote); remote != nil {
-					for _, path := range config.GetPaths(progname + ".monitor.spliced") {
-						if _, network, err := net.ParseCIDR(config.GetString(path, "")); err == nil && network.Contains(remote) {
-							session.spliced = true
-							break
-						}
-					}
-				}
-			}
+			session.spliced = len(Config.GetPaths(PROGNAME+".monitor.spliced")) > 0 && acl.CIDRConfig(session.source, Config, PROGNAME+".monitor.spliced")
 			if lsize == 0 {
-				logger.Info(map[string]interface{}{"scope": "service", "event": "splice", "id": session.id, "name": name, "secure": secure,
-					"source": session.source, "local": session.local, "target": session.target})
+				Logger.Info(map[string]any{
+					"scope": "service", "event": "splice", "id": session.id, "service": name,
+					"source": session.source, "target": session.target,
+				})
 				session.loggued = true
 			}
 			if csize == 0 {
-				update <- session
+				MonitorUpdate <- session
 			}
 
 			go func() {
-				data, opaque, scan := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "["))
+				data, opaque, scan := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(Config.GetString(prefix+"scan.0", "["))
 				for {
 					read, err := source.Read(data)
 					if read > 0 {
@@ -196,8 +229,10 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 							session.tmetrics.write += int64(write)
 						}
 						if err != nil {
-							logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "id": session.id, "name": name, "secure": secure,
-								"source": session.source, "local": session.local, "target": session.target, "error": fmt.Sprintf("%v", err)})
+							Logger.Warn(map[string]any{
+								"scope": "service", "event": "error", "id": session.id, "service": name,
+								"source": session.source, "target": session.target, "error": fmt.Sprintf("%v", err),
+							})
 							break
 						}
 					}
@@ -209,7 +244,7 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 				target.Close()
 			}()
 
-			data, opaque, scan, close := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(config.GetString(prefix+"scan.0", "[")), false
+			data, opaque, scan, close := make([]byte, bsize), make([]byte, 0, osize), rcache.Get(Config.GetString(prefix+"scan.0", "[")), false
 			for !close {
 				target.SetReadDeadline(time.Now().Add(time.Second))
 				read, err := target.Read(data)
@@ -236,33 +271,54 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 						session.smetrics.write += int64(write)
 					}
 					if err != nil {
-						logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "id": session.id, "name": name, "secure": secure,
-							"source": session.source, "local": session.local, "target": session.target, "error": fmt.Sprintf("%v", err)})
+						Logger.Warn(map[string]any{
+							"scope": "service", "event": "error", "id": session.id, "service": name,
+							"source": session.source, "target": session.target, "error": fmt.Sprintf("%v", err)})
 						break
 					}
 				}
 				if err != nil {
 					if err, ok := err.(net.Error); !ok || !err.Timeout() {
+						if session.tmetrics.write > 0 && session.tmetrics.read == 0 {
+							Logger.Warn(map[string]any{
+								"scope": "service", "event": "blacklist", "service": name,
+								"remote": remote, "reason": "connection error", "duration": int(btimeout),
+							})
+							serviceLock.Lock()
+							serviceBlacklist[remote] = &BLACKLIST{reason: "connection timeout", deadline: time.Now().Add(uconfig.Duration(btimeout))}
+							serviceLock.Unlock()
+						}
 						break
 					}
 				}
 				if !session.loggued && (session.tmetrics.write >= lsize || session.smetrics.write >= lsize) {
-					logger.Info(map[string]interface{}{"scope": "service", "event": "splice", "id": session.id, "name": name, "secure": secure,
-						"source": session.source, "local": session.local, "target": session.target})
+					Logger.Info(map[string]any{
+						"scope": "service", "event": "splice", "id": session.id, "service": name,
+						"source": session.source, "target": session.target,
+					})
 					session.loggued = true
 				}
 				if (session.tmetrics.write >= csize || session.smetrics.write >= csize) && time.Since(session.update) >= time.Second*2 {
 					session.update = time.Now()
-					update <- session
+					MonitorUpdate <- session
 				}
 				select {
 				case close = <-session.abort:
 				default:
 				}
 				if itimeout != 0 && time.Since(session.active) >= itimeout {
-					logger.Warn(map[string]interface{}{"scope": "service", "event": "error", "id": session.id, "name": name, "secure": secure,
-						"source": session.source, "local": session.local, "target": session.target, "error": "idle timeout"})
+					Logger.Warn(map[string]any{
+						"scope": "service", "event": "error", "id": session.id, "service": name,
+						"source": session.source, "target": session.target, "error": "idle timeout",
+					})
 					close = true
+					Logger.Warn(map[string]any{
+						"scope": "service", "event": "blacklist", "service": name,
+						"remote": remote, "reason": "traffic timeout", "duration": int(btimeout),
+					})
+					serviceLock.Lock()
+					serviceBlacklist[remote] = &BLACKLIST{reason: "traffic timeout", deadline: time.Now().Add(uconfig.Duration(btimeout))}
+					serviceLock.Unlock()
 				}
 			}
 			source.Close()
@@ -270,32 +326,34 @@ func service_handle(name string, certificate []string, listener net.Listener) {
 
 			if session.tmetrics.write >= lsize || session.smetrics.write >= lsize {
 				duration := math.Max(float64(time.Since(session.started))/float64(time.Second), 0.001)
-				logger.Info(map[string]interface{}{"scope": "service", "event": "unsplice", "id": session.id, "name": name,
-					"source": session.source, "local": session.local, "target": session.target,
+				Logger.Info(map[string]any{
+					"scope": "service", "event": "unsplice", "id": session.id, "service": name,
+					"source": session.source, "target": session.target,
 					"duration": math.Floor(duration*1000) / 1000, "bytes": [2]int64{session.tmetrics.write, session.smetrics.write},
 					"throughput": [2]float64{math.Floor(float64(session.tmetrics.write*8)/(duration*1000)) / 1000,
-						math.Floor(float64(session.smetrics.write*8)/(duration*1000)) / 1000}})
+						math.Floor(float64(session.smetrics.write*8)/(duration*1000)) / 1000},
+				})
 			}
 			if session.tmetrics.write >= csize || session.smetrics.write >= csize {
 				session.done = true
 				session.update = time.Now()
-				update <- session
+				MonitorUpdate <- session
 			}
 		}()
 	}
 }
 
-func service_run() {
+func ServiceRun() {
 	var listeners = map[string]*LISTENER{}
 
 	for {
-		for _, name := range config.GetPaths(progname + ".service") {
-			for _, listen := range config.GetPaths(name + ".listen") {
-				if unbind {
+		for _, name := range Config.GetPaths(PROGNAME + ".service") {
+			for _, listen := range Config.GetPaths(name + ".listen") {
+				if Unbind {
 					continue
 				}
-				name = strings.TrimPrefix(name, progname+".service.")
-				if parts := strings.Split(config.GetStringMatch(listen, "_", `^.*?(:\d+)?((,[^,]+){2})?$`), ","); parts[0] != "_" {
+				name = strings.TrimPrefix(name, PROGNAME+".service.")
+				if parts := strings.Split(Config.GetStringMatch(listen, "_", `^.*?(:\d+)?((,[^,]+){2})?$`), ","); parts[0] != "_" {
 					key := name + "@@" + strings.Join(parts, "@@")
 					if listeners[key] == nil {
 						listeners[key] = &LISTENER{seen: time.Now()}
@@ -305,12 +363,16 @@ func service_run() {
 								if handle, err := listener.NewTCPListener("tcp", strings.TrimLeft(parts[0], "*"), true, 0, 0, nil); err == nil {
 									listeners[key].handle = handle
 									if len(parts) > 1 {
-										logger.Info(map[string]interface{}{"scope": "service", "event": "listen", "name": name, "listen": parts[0],
-											"certificate": strings.Join(parts[1:], ",")})
+										Logger.Info(map[string]any{
+											"scope": "service", "event": "listen", "service": name, "listen": parts[0],
+											"certificate": strings.Join(parts[1:], ","),
+										})
 									} else {
-										logger.Info(map[string]interface{}{"scope": "service", "event": "listen", "name": name, "listen": parts[0]})
+										Logger.Info(map[string]any{
+											"scope": "service", "event": "listen", "service": name, "listen": parts[0],
+										})
 									}
-									service_handle(name, parts[1:], handle)
+									serviceHandle(name, parts[1:], handle)
 									break close
 								}
 								time.Sleep(time.Second)
@@ -326,14 +388,16 @@ func service_run() {
 		time.Sleep(time.Second)
 
 		for key, listener := range listeners {
-			if time.Since(listener.seen) >= 5*time.Second || unbind {
+			if time.Since(listener.seen) >= 5*time.Second || Unbind {
 				if listener.handle != nil {
 					listener.handle.Close()
 					listener.handle = nil
 				}
 				delete(listeners, key)
 				parts := strings.Split(key, "@@")
-				logger.Info(map[string]interface{}{"scope": "service", "event": "close", "name": parts[0], "listen": parts[1]})
+				Logger.Info(map[string]any{
+					"scope": "service", "event": "close", "service": parts[0], "listen": parts[1],
+				})
 			}
 		}
 	}

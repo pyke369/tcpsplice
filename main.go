@@ -12,14 +12,14 @@ import (
 	"github.com/pyke369/golang-support/ulog"
 )
 
-const progname = "tcpsplice"
-const version = "1.4.0"
+const PROGNAME = "tcpsplice"
+const VERSION = "1.4.0"
 
 var (
-	config  *uconfig.UConfig
-	logger  *ulog.ULog
-	started time.Time
-	unbind  bool
+	Config  *uconfig.UConfig
+	Logger  *ulog.ULog
+	Started time.Time
+	Unbind  bool
 )
 
 func main() {
@@ -29,18 +29,20 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: %s <configuration file>\n", filepath.Base(os.Args[0]))
 		os.Exit(1)
 	}
-	if config, err = uconfig.New(os.Args[1]); err != nil {
+	if Config, err = uconfig.New(os.Args[1]); err != nil {
 		fmt.Fprintf(os.Stderr, "configuration file syntax error: %s - aborting\n", err)
 		os.Exit(2)
 	}
 
-	logger = ulog.New(config.GetString(progname+".log", "console(output=stdout)"))
-	logger.Info(map[string]interface{}{"scope": "main", "event": "start", "version": version, "config": os.Args[1], "pid": os.Getpid(),
-		"services": len(config.GetPaths(progname + ".service"))})
-	started = time.Now()
+	Logger = ulog.New(Config.GetString(PROGNAME+".log", "console(output=stdout)"))
+	Logger.Info(map[string]any{
+		"scope": "main", "event": "start", "version": VERSION, "config": os.Args[1],
+		"pid": os.Getpid(), "services": len(Config.GetPaths(PROGNAME + ".service")),
+	})
+	Started = time.Now()
 
-	go service_run()
-	go monitor_run()
+	go ServiceRun()
+	go MonitorRun()
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGHUP, syscall.SIGUSR1)
@@ -49,20 +51,28 @@ func main() {
 		switch {
 		case signal == syscall.SIGHUP:
 			if _, err = uconfig.New(os.Args[1]); err == nil {
-				config.Load(os.Args[1])
-				logger.Load(config.GetString(progname+".log", "console(output=stdout)"))
-				logger.Info(map[string]interface{}{"scope": "main", "event": "reload", "version": version, "config": os.Args[1], "pid": os.Getpid(),
-					"services": len(config.GetPaths(progname + ".service"))})
+				Config.Load(os.Args[1])
+				Logger.Load(Config.GetString(PROGNAME+".log", "console(output=stdout)"))
+				Logger.Info(map[string]any{
+					"scope": "main", "event": "reload", "version": VERSION, "config": os.Args[1],
+					"pid": os.Getpid(), "services": len(Config.GetPaths(PROGNAME + ".service")),
+				})
 			} else {
-				logger.Warn(map[string]interface{}{"scope": "main", "event": "reload", "config": os.Args[1], "error": fmt.Sprintf("%v", err)})
+				Logger.Warn(map[string]any{
+					"scope": "main", "event": "reload", "config": os.Args[1], "error": fmt.Sprintf("%v", err),
+				})
 			}
 
 		case signal == syscall.SIGUSR1:
-			unbind = !unbind
-			if unbind {
-				logger.Info(map[string]interface{}{"scope": "main", "event": "unbind", "services": len(config.GetPaths(progname + ".service"))})
+			Unbind = !Unbind
+			if Unbind {
+				Logger.Info(map[string]any{
+					"scope": "main", "event": "unbind", "services": len(Config.GetPaths(PROGNAME + ".service")),
+				})
 			} else {
-				logger.Info(map[string]interface{}{"scope": "main", "event": "rebind", "services": len(config.GetPaths(progname + ".service"))})
+				Logger.Info(map[string]any{
+					"scope": "main", "event": "rebind", "services": len(Config.GetPaths(PROGNAME + ".service")),
+				})
 			}
 		}
 	}

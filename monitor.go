@@ -8,23 +8,23 @@ import (
 	"io"
 	"log"
 	"math"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pyke369/golang-support/acl"
 	"github.com/pyke369/golang-support/dynacert"
 )
 
 var (
-	update   = make(chan *SESSION, 128)
-	sessions = map[string]*SESSION{}
-	lock     sync.RWMutex
+	MonitorUpdate   = make(chan *SESSION, 128)
+	monitorSessions = map[string]*SESSION{}
+	monitorLock     sync.RWMutex
 )
 
-func monitor_handle(response http.ResponseWriter, request *http.Request) {
-	response.Header().Set("Server", progname+"/"+version)
+func monitorHandle(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Server", PROGNAME+"/"+VERSION)
 	response.Header().Set("Access-Control-Allow-Origin", "*")
 
 	if request.Method == "OPTIONS" {
@@ -34,55 +34,32 @@ func monitor_handle(response http.ResponseWriter, request *http.Request) {
 		response.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-
-	noauth := false
-	if remote, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
-		if remote := net.ParseIP(remote); remote != nil {
-			for _, entry := range config.GetPaths(progname + ".monitor.noauth") {
-				entry = config.GetString(entry, "")
-				if _, network, err := net.ParseCIDR(entry); err == nil {
-					if remote != nil && network.Contains(remote) {
-						noauth = true
-						break
-					}
-				}
-			}
-		}
+	credentials, noauth := "", len(Config.GetPaths(PROGNAME+".monitor.noauth")) > 0 && acl.CIDRConfig(request.RemoteAddr, Config, PROGNAME+".monitor.noauth")
+	if username, password, ok := request.BasicAuth(); ok {
+		credentials = username + ":" + password
 	}
-	if !noauth && len(config.GetPaths(progname+".monitor.auth")) != 0 {
-		credentials, matched := "", false
-		if username, password, ok := request.BasicAuth(); ok {
-			credentials = username + ":" + password
-		}
-		for _, auth := range config.GetPaths(progname + ".monitor.auth") {
-			if config.GetString(auth, "") == credentials {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			response.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=\"%s\"", progname))
-			response.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	if !noauth && len(Config.GetPaths(PROGNAME+".monitor.auth")) > 0 && !acl.PasswordConfig(credentials, Config, PROGNAME+".monitor.auth") {
+		response.Header().Set("WWW-Authenticate", fmt.Sprintf("Basic realm=\"%s\"", PROGNAME))
+		response.WriteHeader(http.StatusUnauthorized)
+		return
 	}
 
 	switch {
 	case request.URL.Path == "/sessions.json":
-		output := map[string]interface{}{
-			"server": map[string]interface{}{
-				"version": version,
-				"uptime":  time.Since(started) / time.Second,
+		output := map[string]any{
+			"server": map[string]any{
+				"version": VERSION,
+				"uptime":  time.Since(Started) / time.Second,
 			},
 		}
-		services := map[string]interface{}{}
-		for _, name := range config.GetPaths(progname + ".service") {
-			name = strings.TrimPrefix(name, progname+".service.")
-			entries := map[string]interface{}{}
-			lock.RLock()
-			for id, session := range sessions {
+		services := map[string]any{}
+		for _, name := range Config.GetPaths(PROGNAME + ".service") {
+			name = strings.TrimPrefix(name, PROGNAME+".service.")
+			entries := map[string]any{}
+			monitorLock.RLock()
+			for id, session := range monitorSessions {
 				if session.name == name {
-					entries[id] = map[string]interface{}{
+					entries[id] = map[string]any{
 						"started":  session.started.Unix(),
 						"duration": time.Since(session.started) / time.Second,
 						"source":   session.source,
@@ -99,7 +76,7 @@ func monitor_handle(response http.ResponseWriter, request *http.Request) {
 					}
 				}
 			}
-			lock.RUnlock()
+			monitorLock.RUnlock()
 			services[name] = entries
 		}
 		output["services"] = services
@@ -109,24 +86,26 @@ func monitor_handle(response http.ResponseWriter, request *http.Request) {
 		}
 
 	case strings.HasPrefix(request.URL.Path, "/abort/"):
-		lock.RLock()
-		for id, session := range sessions {
+		monitorLock.RLock()
+		for id, session := range monitorSessions {
 			if id == request.URL.Path[7:] && !session.done {
 				session.done = true
 				session.abort <- true
-				logger.Warn(map[string]interface{}{"scope": "monitor", "event": "abort", "id": id, "name": session.name,
-					"source": session.source, "local": session.local, "target": session.target})
+				Logger.Warn(map[string]any{
+					"scope": "monitor", "event": "abort", "id": id, "name": session.name,
+					"source": session.source, "local": session.local, "target": session.target,
+				})
 				break
 			}
 		}
-		lock.RUnlock()
+		monitorLock.RUnlock()
 	}
 }
 
-func monitor_run() {
+func MonitorRun() {
 	handler := http.NewServeMux()
-	handler.HandleFunc("/sessions.json", monitor_handle)
-	handler.HandleFunc("/abort/", monitor_handle)
+	handler.HandleFunc("/sessions.json", monitorHandle)
+	handler.HandleFunc("/abort/", monitorHandle)
 	handler.Handle("/", http.StripPrefix("/", ResourcesHandler(6*time.Hour)))
 
 	go func() {
@@ -135,18 +114,22 @@ func monitor_run() {
 		key := ""
 		for {
 			time.Sleep(time.Second)
-			if unbind {
+			if Unbind {
 				if server != nil {
-					logger.Info(map[string]interface{}{"scope": "monitor", "event": "close", "listen": strings.Split(key, "@@")[0]})
+					Logger.Info(map[string]any{
+						"scope": "monitor", "event": "close", "listen": strings.Split(key, "@@")[0],
+					})
 					server.Shutdown(context.Background())
 					key, server = "", nil
 				}
 				continue
 			}
-			if parts := strings.Split(config.GetStringMatch(progname+".monitor.listen", "_", `^.*?(:\d+)?((,[^,]+){2})?$`), ","); parts[0] != "_" {
+			if parts := strings.Split(Config.GetStringMatch(PROGNAME+".monitor.listen", "_", `^.*?(:\d+)?((,[^,]+){2})?$`), ","); parts[0] != "_" {
 				if value := strings.Join(parts, "@@"); value != key {
 					if server != nil {
-						logger.Info(map[string]interface{}{"scope": "monitor", "event": "close", "listen": strings.Split(key, "@@")[0]})
+						Logger.Info(map[string]any{
+							"scope": "monitor", "event": "close", "listen": strings.Split(key, "@@")[0],
+						})
 						server.Shutdown(context.Background())
 					}
 					key, server = value, &http.Server{
@@ -163,13 +146,17 @@ func monitor_run() {
 						certificate.Add("*", parts[1], parts[2])
 						server.TLSConfig = dynacert.IntermediateTLSConfig(certificate.GetCertificate)
 						go func(server *http.Server, parts []string) {
-							logger.Info(map[string]interface{}{"scope": "monitor", "event": "listen", "listen": parts[0], "certificate": strings.Join(parts[1:], ",")})
+							Logger.Info(map[string]any{
+								"scope": "monitor", "event": "listen", "listen": parts[0], "certificate": strings.Join(parts[1:], ","),
+							})
 							server.ListenAndServeTLS("", "")
 							key = ""
 						}(server, parts)
 					} else {
 						go func(server *http.Server, parts []string) {
-							logger.Info(map[string]interface{}{"scope": "monitor", "event": "listen", "listen": parts[0]})
+							Logger.Info(map[string]any{
+								"scope": "monitor", "event": "listen", "listen": parts[0],
+							})
 							server.ListenAndServe()
 							key = ""
 						}(server, parts)
@@ -182,26 +169,28 @@ func monitor_run() {
 	go func() {
 		for range time.Tick(time.Second) {
 			count := 0
-			lock.Lock()
-			for id, session := range sessions {
+			monitorLock.Lock()
+			for id, session := range monitorSessions {
 				if time.Since(session.update) >= 3*time.Second {
-					delete(sessions, id)
+					delete(monitorSessions, id)
 					count++
 				}
 			}
-			lock.Unlock()
+			monitorLock.Unlock()
 			if count > 0 {
-				logger.Info(map[string]interface{}{"scope": "monitor", "event": "clean", "sessions": count})
+				Logger.Info(map[string]any{
+					"scope": "monitor", "event": "clean", "sessions": count,
+				})
 			}
 		}
 	}()
 
 	for {
-		session := <-update
+		session := <-MonitorUpdate
 		id := session.id
-		lock.Lock()
-		if sessions[id] == nil {
-			sessions[id] = &SESSION{
+		monitorLock.Lock()
+		if monitorSessions[id] == nil {
+			monitorSessions[id] = &SESSION{
 				name:    session.name,
 				source:  session.source,
 				local:   session.local,
@@ -216,25 +205,25 @@ func monitor_run() {
 		duration := math.Max(float64(time.Since(session.started))/float64(time.Second), 0.001)
 		session.smetrics.mean = math.Floor(float64(session.tmetrics.write*8)/(duration*1000)) / 1000
 		session.tmetrics.mean = math.Floor(float64(session.smetrics.write*8)/(duration*1000)) / 1000
-		if !session.update.IsZero() && !sessions[id].update.IsZero() {
-			duration = math.Max(float64(session.update.Sub(sessions[id].update))/float64(time.Second), 0.001)
-			session.smetrics.last = math.Floor(float64((session.tmetrics.write-sessions[id].tmetrics.write)*8)/(duration*1000)) / 1000
-			session.tmetrics.last = math.Floor(float64((session.smetrics.write-sessions[id].smetrics.write)*8)/(duration*1000)) / 1000
+		if !session.update.IsZero() && !monitorSessions[id].update.IsZero() {
+			duration = math.Max(float64(session.update.Sub(monitorSessions[id].update))/float64(time.Second), 0.001)
+			session.smetrics.last = math.Floor(float64((session.tmetrics.write-monitorSessions[id].tmetrics.write)*8)/(duration*1000)) / 1000
+			session.tmetrics.last = math.Floor(float64((session.smetrics.write-monitorSessions[id].smetrics.write)*8)/(duration*1000)) / 1000
 		} else {
 			session.smetrics.last = session.smetrics.mean
 			session.tmetrics.last = session.tmetrics.mean
 		}
-		sessions[id].opaque = session.opaque
-		sessions[id].update = session.update
-		sessions[id].done = session.done
-		sessions[id].smetrics.read = session.smetrics.read
-		sessions[id].smetrics.write = session.smetrics.write
-		sessions[id].smetrics.mean = session.smetrics.mean
-		sessions[id].smetrics.last = session.smetrics.last
-		sessions[id].tmetrics.read = session.tmetrics.read
-		sessions[id].tmetrics.write = session.tmetrics.write
-		sessions[id].tmetrics.mean = session.tmetrics.mean
-		sessions[id].tmetrics.last = session.tmetrics.last
-		lock.Unlock()
+		monitorSessions[id].opaque = session.opaque
+		monitorSessions[id].update = session.update
+		monitorSessions[id].done = session.done
+		monitorSessions[id].smetrics.read = session.smetrics.read
+		monitorSessions[id].smetrics.write = session.smetrics.write
+		monitorSessions[id].smetrics.mean = session.smetrics.mean
+		monitorSessions[id].smetrics.last = session.smetrics.last
+		monitorSessions[id].tmetrics.read = session.tmetrics.read
+		monitorSessions[id].tmetrics.write = session.tmetrics.write
+		monitorSessions[id].tmetrics.mean = session.tmetrics.mean
+		monitorSessions[id].tmetrics.last = session.tmetrics.last
+		monitorLock.Unlock()
 	}
 }
