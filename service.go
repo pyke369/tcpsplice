@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -70,8 +71,8 @@ func serviceHandle(name string, certificate []string, listener net.Listener) {
 		lsize := Config.GetSizeBounds(prefix+"size.log", 16<<10, 0, math.MaxInt64)
 		osize := int(Config.GetSizeBounds(prefix+"size.opaque", 16<<10, 0, 64<<10))
 		wtimeout := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.write", 10, 1, 30))
-		itimeout := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.idle", 7, 0, 30))
-		btimeout := Config.GetDurationBounds(prefix+"timeout.blacklist", 45, 10, 300)
+		itimeout := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.idle", 10, 0, 30))
+		btimeout := Config.GetDurationBounds(prefix+"timeout.blacklist", 30, 10, 300)
 
 		go func() {
 			var (
@@ -111,40 +112,37 @@ func serviceHandle(name string, certificate []string, listener net.Listener) {
 				}
 			}
 
-			ctimeout, index, remote := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.connect", 10, 1, 30)), 0, ""
+			ctimeout, index, remote, remotes := uconfig.Duration(Config.GetDurationBounds(prefix+"timeout.connect", 10, 1, 30)), 0, "", []string{}
 			for index, remote = range targets {
-				remote = Config.GetString(remote, "")
+				serviceLock.Lock()
+				remotes = []string{}
+				for _, value := range strings.Split(Config.GetString(remote, ""), ",") {
+					value = strings.TrimSpace(value)
+					if blacklist := serviceBlacklist[value]; blacklist == nil || time.Now().After(blacklist.deadline) {
+						remotes = append(remotes, value)
+					}
+				}
+				serviceLock.Unlock()
+				if len(remotes) == 0 {
+					continue
+				}
+				remote = remotes[rand.Intn(len(remotes))]
 				parts := strings.SplitN(remote, "@", 2)
 				if len(parts) > 1 && parts[0] == "tls" {
 					remote = parts[1]
 				}
-				serviceLock.Lock()
-				if blacklist := serviceBlacklist[remote]; blacklist != nil && time.Now().Before(blacklist.deadline) {
-					Logger.Warn(map[string]any{
-						"scope": "service", "event": "skip", "service": name, "remote": remote,
-						"reason": blacklist.reason, "remaining": blacklist.deadline.Sub(time.Now()) / time.Second,
-					})
-					serviceLock.Unlock()
-					if index >= len(targets)-1 {
-						Logger.Error(map[string]any{
-							"scope": "service", "event": "error", "service": name,
-							"source": source.RemoteAddr().String(), "error": "no available target",
-						})
-						source.Close()
-						return
-					}
-					continue
-				}
-				serviceLock.Unlock()
+
 				start := time.Now()
 				if target, err = net.DialTimeout("tcp", remote, time.Duration(math.Max(float64(time.Second), float64(ctimeout)/float64(len(targets))))); err != nil {
-					Logger.Warn(map[string]any{
-						"scope": "service", "event": "blacklist", "service": name,
-						"remote": remote, "reason": "connect", "duration": int(btimeout),
-					})
-					serviceLock.Lock()
-					serviceBlacklist[remote] = &BLACKLIST{reason: "connection error", deadline: time.Now().Add(uconfig.Duration(btimeout))}
-					serviceLock.Unlock()
+					if index < len(targets)-1 || len(remotes) > 1 {
+						Logger.Warn(map[string]any{
+							"scope": "service", "event": "blacklist", "service": name,
+							"target": remote, "reason": "connection error", "duration": int(btimeout),
+						})
+						serviceLock.Lock()
+						serviceBlacklist[remote] = &BLACKLIST{reason: "connection error", deadline: time.Now().Add(uconfig.Duration(btimeout))}
+						serviceLock.Unlock()
+					}
 					ctimeout -= time.Since(start)
 					if ctimeout <= 0 || index >= len(targets)-1 {
 						Logger.Error(map[string]any{
@@ -176,6 +174,10 @@ func serviceHandle(name string, certificate []string, listener net.Listener) {
 					target = net.Conn(sconn)
 				}
 				break
+			}
+			if target == nil {
+				source.Close()
+				return
 			}
 
 			session := &SESSION{
@@ -279,10 +281,11 @@ func serviceHandle(name string, certificate []string, listener net.Listener) {
 				}
 				if err != nil {
 					if err, ok := err.(net.Error); !ok || !err.Timeout() {
-						if session.tmetrics.write > 0 && session.tmetrics.read == 0 {
+						if (index < len(targets)-1 || len(remotes) > 1) && session.tmetrics.write > 0 && session.tmetrics.read == 0 {
+							fmt.Printf("connection timeout index=%d/%d len(remotes)=%d\n", index, len(targets), len(remotes))
 							Logger.Warn(map[string]any{
 								"scope": "service", "event": "blacklist", "service": name,
-								"remote": remote, "reason": "connection error", "duration": int(btimeout),
+								"target": remote, "reason": "connection timeout", "duration": int(btimeout),
 							})
 							serviceLock.Lock()
 							serviceBlacklist[remote] = &BLACKLIST{reason: "connection timeout", deadline: time.Now().Add(uconfig.Duration(btimeout))}
@@ -312,13 +315,6 @@ func serviceHandle(name string, certificate []string, listener net.Listener) {
 						"source": session.source, "target": session.target, "error": "idle timeout",
 					})
 					close = true
-					Logger.Warn(map[string]any{
-						"scope": "service", "event": "blacklist", "service": name,
-						"remote": remote, "reason": "traffic timeout", "duration": int(btimeout),
-					})
-					serviceLock.Lock()
-					serviceBlacklist[remote] = &BLACKLIST{reason: "traffic timeout", deadline: time.Now().Add(uconfig.Duration(btimeout))}
-					serviceLock.Unlock()
 				}
 			}
 			source.Close()

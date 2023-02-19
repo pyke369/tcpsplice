@@ -1,3 +1,9 @@
+tcpsplice (1.4.1) stable; urgency=medium
+
+  * add a minimalist target load-balancing mechanism
+
+ -- Pierre-Yves Kerembellec <py.kerembellec@gmail.com>  Sun, 19 Feb 2023 15:15:41 +0000
+
 tcpsplice (1.4.0) stable; urgency=medium
 
   * add an in-band dead-hop bypass mechanism
